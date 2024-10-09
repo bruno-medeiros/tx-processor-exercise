@@ -7,4 +7,4 @@ Transactions amounts are represent by floats. This could be improved to use a de
 
 Tests could be improved by fuzzing or generally any automated test case generation. (ie, property based testing)
 
-For simplification some error cases not explicitly required by problem statement are not verified. Ie, that Resolves and Chargebacks reference a previous Dispute, and at most one Dispute only, etc.
+For simplification some error cases not explicitly required by problem statement are not verified. Ie, that Resolves and Chargebacks reference a previous Dispute, and at most one Dispute only, etc. - the input is assumed correct for those constraints.
