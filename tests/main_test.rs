@@ -9,7 +9,7 @@ fn main_test() {
 
     let output = String::from_utf8(output).unwrap();
     assert!(output.starts_with("client, available, held, total, locked"));
-    assert!(output.contains("\n1, 1.5, 0, 1.5, false"));
-    assert!(output.contains("\n2, 2, 0, 2, false"));
+    assert!(output.contains("\n1, 127.9, 0, 127.9, false"));
+    assert!(output.contains("\n2, 0, 80, 80, false"));
 
 }
