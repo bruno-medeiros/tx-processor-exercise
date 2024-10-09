@@ -3,14 +3,14 @@ use crate::GResult;
 use std::collections::HashMap;
 
 pub struct TxProcessor {
-    referenced_transactions: HashMap<TxId, TxAmount>,
-    clients_balance: HashMap<ClientId, ClientBalance>,
+    pub account_transactions: HashMap<TxId, TxAmount>,
+    pub clients_balance: HashMap<ClientId, ClientBalance>,
 }
 
 impl TxProcessor {
     pub fn new() -> TxProcessor {
         Self {
-            referenced_transactions: HashMap::new(),
+            account_transactions: HashMap::new(),
             clients_balance: HashMap::new(),
         }
     }
@@ -29,20 +29,36 @@ impl TxProcessor {
 
             match tx.tx_type {
                 TxType::Deposit => {
-                    client_entry.add_funds(tx.amount);
+                    let amount = tx.amount.ok_or("amount missing")?;
+                    client_entry.add_funds(amount);
                 }
                 TxType::Withdrawal => {
-                    client_entry.remove_funds(tx.amount).unwrap_or_else(|_err|{
-                        // log error somewhere
+                    let amount = tx.amount.ok_or("amount missing")?;
+                    client_entry.remove_funds(amount).unwrap_or_else(|_err|{
+                        // withdrawal denied due to no funds
                     });
                 }
-                TxType::Dispute | TxType::Resolve | TxType::Chargeback => {
-                    self.referenced_transactions.insert(tx.tx_id, tx.amount);
+                TxType::Dispute => {
+                    if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
+                        client_entry.hold_funds(*amount);
+                    }
+                }
+                TxType::Resolve => {
+                    if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
+                        client_entry.resolve_funds(*amount);
+                    }
+                }
+                TxType::Chargeback => {
+                    if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
+                        client_entry.chargeback_funds(*amount);
+                    }
                 }
             }
+
             match tx.tx_type {
-                TxType::Dispute | TxType::Resolve | TxType::Chargeback => {
-                    self.referenced_transactions.insert(tx.tx_id, tx.amount);
+                TxType::Deposit => {
+                    let amount = tx.amount.ok_or("amount missing")?;
+                    self.account_transactions.insert(tx.tx_id, amount);
                 }
                 _ => {}
             }
@@ -63,7 +79,7 @@ mod tests {
             tx_type: TxType::Deposit,
             client,
             tx_id,
-            amount,
+            amount : Some(amount),
         }
     }
     fn withdrawal(client: ClientId, tx_id: TxId, amount: TxAmount) -> Transaction {
@@ -71,7 +87,7 @@ mod tests {
             tx_type: TxType::Withdrawal,
             client,
             tx_id,
-            amount,
+            amount : Some(amount),
         }
     }
     fn process_tx(tx_processor: &mut TxProcessor, transaction: Transaction) -> GResult<()> {
@@ -153,6 +169,133 @@ mod tests {
         expected_balance.total = 0.0;
         expected_balance.available = 0.0;
         assert_eq!(c1_balance, &expected_balance);
+
+        Ok(())
+    }
+
+    fn dispute(tx_type: TxType, client: ClientId, tx_id: TxId) -> Transaction {
+        Transaction {
+            tx_type,
+            client,
+            tx_id,
+            amount : None,
+        }
+    }
+
+    #[test]
+    fn test_error_references() -> GResult<()> {
+        let mut tx_processor = TxProcessor::new();
+
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
+        process_tx(&mut tx_processor, deposit(1, 2, 500.0))?;
+
+        // Test bad references.
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 666))?;
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 666))?;
+        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 666))?;
+
+        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
+        assert_eq!(c1_balance, &ClientBalance {
+            client: 1,
+            total: 1500.0,
+            held: 0.0,
+            available: 1500.0,
+            locked: false,
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dispute_resolve() -> GResult<()> {
+        let mut tx_processor = TxProcessor::new();
+
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
+        process_tx(&mut tx_processor, deposit(1, 2, 500.0))?;
+
+        // Test a dispute.
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2))?;
+
+        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
+        assert_eq!(c1_balance, &ClientBalance {
+            client: 1,
+            total: 1500.0,
+            held: 500.0,
+            available: 1500.0 - 500.0,
+            locked: false,
+        });
+
+        // Test a resolve.
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2))?;
+
+        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
+        assert_eq!(c1_balance, &ClientBalance {
+            client: 1,
+            total: 1500.0,
+            held: 0.0,
+            available: 1500.0,
+            locked: false,
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dispute_resolve_multiple() -> GResult<()> {
+        let mut tx_processor = TxProcessor::new();
+
+        process_tx(&mut tx_processor, deposit(1, 1, 50.0))?;
+        process_tx(&mut tx_processor, deposit(1, 2, 60.0))?;
+        process_tx(&mut tx_processor, deposit(1, 3, 80.0))?;
+
+        // Test two pending disputes.
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2))?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 3))?;
+
+        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
+        assert_eq!(c1_balance, &ClientBalance {
+            client: 1,
+            total: 50.0 + 60.0 + 80.0,
+            held: 60.0 + 80.0,
+            available: 50.0,
+            locked: false,
+        });
+
+        // Test a resolve.
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2))?;
+
+        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
+        assert_eq!(c1_balance, &ClientBalance {
+            client: 1,
+            total: 50.0 + 60.0 + 80.0,
+            held: 80.0,
+            available: 50.0 + 60.0,
+            locked: false,
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_chargeback() -> GResult<()> {
+        let mut tx_processor = TxProcessor::new();
+
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
+        process_tx(&mut tx_processor, deposit(1, 2, 500.0))?;
+
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2))?;
+
+        // Test chargeback
+        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 2))?;
+
+        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
+        assert_eq!(c1_balance, &ClientBalance {
+            client: 1,
+            total: 1000.0,
+            held: 00.0,
+            available: 1000.0,
+            locked: true,
+        });
 
         Ok(())
     }

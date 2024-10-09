@@ -1,4 +1,5 @@
-use std::{error::Error, io, process};
+use std::{error::Error};
+use std::io::stdout;
 use tx_processor::process_file_and_output;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -8,5 +9,5 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let path = &args[1];
-    process_file_and_output(path)
+    process_file_and_output(path, &mut stdout())
 }
