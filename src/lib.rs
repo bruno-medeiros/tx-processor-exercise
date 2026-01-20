@@ -11,6 +11,7 @@ use tokio_stream::wrappers::LinesStream;
 pub mod model;
 pub mod tx_processor;
 
+
 #[derive(Debug, thiserror::Error)]
 pub enum TxProcessorError {
     #[error("IoError")]
@@ -62,7 +63,11 @@ pub async fn process_file_and_output<OUT: io::Write>(
 
     for cb in values {
         let client = cb.client;
-        let (available, held, total, locked) = (cb.available, cb.held, cb.total, cb.locked);
+        let locked = cb.locked;
+        // Convert to float just for printing and avoid trailing zeros
+        let available = cb.available.to_f64();
+        let held = cb.held.to_f64();
+        let total = cb.total.to_f64();
         writeln!(stdout, "{client}, {available}, {held}, {total}, {locked}")?;
     }
     Ok(())
