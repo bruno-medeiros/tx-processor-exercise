@@ -1,10 +1,12 @@
 ## Info
 
-Basic design of the transaction processor: Each transaction is streamed and processed as it arrives. The processor keeps in memory a record of all Deposits so that they can be referenced by disputes. (assumption is that only Deposits can be disputed)
- - For prod-ready code we'd need a way to purge stale entries from this data structure. An alternative solution would be to process the csv in two stage, first stage just to collect transactions reference by Disputes. But, this might not work well for a full streaming approach (where end of stream is not known).
+Basic design of the transaction processor: Each transaction is streamed and processed as it arrives. A futures Stream is used for more flexibility in different cases (network etc). 
+  - The processor keeps in memory a record of all Deposits so that they can be referenced by disputes. Assumption here is that only Deposits can be disputed, based on how the spec is phrased: 
+    - > "This means that the clients available funds should decrease by the amount disputed, their held funds should increase by the amount disputed"
 
-Transactions amounts are represent by floats. This could be improved to use a decimal type suitable for financial transactions (to avoid rounding errors).
+ - Transactions amounts are represent by fastnum decimal type, not floats. fastnum is used instead of BigDecimal as it's faster and more memory efficient.
 
-Tests could be improved by fuzzing or generally any automated test case generation. (ie, property based testing)
+ - Tests could be improved by fuzzing or generally any automated test case generation. (ie, property based testing)
 
-For simplification some error cases not explicitly required by problem statement are not verified. Ie, that Resolves and Chargebacks reference a previous Dispute, and at most one Dispute only, etc. - the input is assumed correct for those constraints.
+ - Made assumption that transactions can only Resolved/Chargedback once. (TODO: needs tests for this)
+

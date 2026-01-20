@@ -8,6 +8,7 @@ use tokio::pin;
 pub struct TxProcessor {
     pub account_transactions: HashMap<TxId, TxAmount>,
     pub disputed_transactions: HashSet<TxId>,
+    pub resolved_transactions: HashSet<TxId>,
     pub clients_balance: HashMap<ClientId, ClientBalance>,
 }
 
@@ -46,7 +47,6 @@ impl TxProcessor {
                         if self.disputed_transactions.contains(&tx.tx_id) {
                             // Already disputed, ignore
                         } else {
-                            // TODO: also check already resolved/chargebacked txs?
                             self.disputed_transactions.insert(tx.tx_id);
                             client_entry.hold_funds(*amount);
                         }
@@ -54,34 +54,37 @@ impl TxProcessor {
                 }
                 TxType::Resolve => {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
-                        if self.disputed_transactions.contains(&tx.tx_id) {
-                            client_entry.resolve_funds(*amount);
-                            self.disputed_transactions.remove(&tx.tx_id);
-                        } else {
+                        if !self.disputed_transactions.contains(&tx.tx_id) {
                             // Not disputed, ignore
+                        } else {
+                            if self.resolved_transactions.contains(&tx.tx_id) {
+                                // Already resolved/Chargebacked, ignore
+                            } else {
+                                client_entry.resolve_funds(*amount);
+                                self.resolved_transactions.insert(tx.tx_id);
+                            }
                         }
                     }
                 }
                 TxType::Chargeback => {
                     // Check tx_id is under dispute
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
-                        if self.disputed_transactions.contains(&tx.tx_id) {
-                            client_entry.chargeback_funds(*amount);
-                            self.disputed_transactions.remove(&tx.tx_id);
-                        } else {
+                        if !self.disputed_transactions.contains(&tx.tx_id) {
                             // Not disputed, ignore
+                        } else {
+                            if self.resolved_transactions.contains(&tx.tx_id) {
+                                // Already resolved/Chargebacked, ignore
+                            } else {
+                                client_entry.chargeback_funds(*amount);
+                                self.resolved_transactions.insert(tx.tx_id);
+                            }
                         }
                     }
                 }
             }
 
             // Store Deposits in account_transactions record for referencing during Disputes/Resolves.
-            // The spec doesn't clarify if it's Deposits or Withdrawals that can be disputed,
-            // but from the description:
-            // "This means that the clients available funds should decrease by the amount disputed,
-            // their held funds should increase by the amount disputed"
-            // only Deposits make sense for disputes.
-            // (Maybe Withdrawals too if amount was inverted)
+            // See README for more info on this assumption.
             #[allow(clippy::single_match)]
             match tx.tx_type {
                 TxType::Deposit => {
