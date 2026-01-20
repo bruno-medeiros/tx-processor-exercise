@@ -11,7 +11,6 @@ use tokio_stream::wrappers::LinesStream;
 pub mod model;
 pub mod tx_processor;
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum TxProcessorError {
     #[error("IoError")]
@@ -111,13 +110,14 @@ chargeback, 5, 6,
 "#
         .as_bytes();
 
-        let  reader = BufReader::new(input);
+        let reader = BufReader::new(input);
         let mut stream = LinesStream::new(reader.lines());
         stream.next().await.unwrap().ok();
 
         let txs = stream
             .map(|res| parse_csv_transaction(res.unwrap()).unwrap())
-            .collect::<Vec<Transaction>>().await;
+            .collect::<Vec<Transaction>>()
+            .await;
 
         assert!(txs.len() == 5);
 

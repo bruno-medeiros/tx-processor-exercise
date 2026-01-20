@@ -13,5 +13,4 @@ async fn main_test() {
     assert!(output.starts_with("client, available, held, total, locked"));
     assert!(output.contains("\n1, 127.9, 0, 127.9, false"));
     assert!(output.contains("\n2, 0, 80, 80, false"));
-
 }

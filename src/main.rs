@@ -1,4 +1,4 @@
-use std::{error::Error};
+use std::error::Error;
 use std::io::stdout;
 use tx_processor::process_file_and_output;
 

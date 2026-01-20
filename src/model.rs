@@ -1,6 +1,6 @@
-use fastnum::{dec256};
-use strum_macros::EnumString;
 use crate::TxProcessorError;
+use fastnum::dec256;
+use strum_macros::EnumString;
 
 #[derive(Debug, Eq, PartialEq, serde::Deserialize, EnumString)]
 #[strum(ascii_case_insensitive)]
