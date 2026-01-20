@@ -8,7 +8,7 @@ use tokio::pin;
 pub struct TxProcessor {
     pub account_transactions: HashMap<TxId, TxAmount>,
     pub disputed_transactions: HashSet<TxId>,
-    pub resolved_transactions: HashSet<TxId>,
+    pub chargeback_transactions: HashSet<TxId>,
     pub clients_balance: HashMap<ClientId, ClientBalance>,
 }
 
@@ -43,10 +43,14 @@ impl TxProcessor {
                 TxDetails::Dispute => {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
                         if self.disputed_transactions.contains(&tx.tx_id) {
-                            // Already disputed, ignore
+                            // Already in dispute statem ignore
                         } else {
-                            self.disputed_transactions.insert(tx.tx_id);
-                            client_entry.hold_funds(*amount);
+                            if self.chargeback_transactions.contains(&tx.tx_id) {
+                                // Already chargebacked, ignore
+                            } else {
+                                self.disputed_transactions.insert(tx.tx_id);
+                                client_entry.hold_funds(*amount);
+                            }
                         }
                     }
                 }
@@ -55,12 +59,8 @@ impl TxProcessor {
                         if !self.disputed_transactions.contains(&tx.tx_id) {
                             // Not disputed, ignore
                         } else {
-                            if self.resolved_transactions.contains(&tx.tx_id) {
-                                // Already resolved/Chargebacked, ignore
-                            } else {
-                                client_entry.resolve_funds(*amount);
-                                self.resolved_transactions.insert(tx.tx_id);
-                            }
+                            client_entry.resolve_funds(*amount);
+                            self.disputed_transactions.remove(&tx.tx_id);
                         }
                     }
                 }
@@ -70,11 +70,11 @@ impl TxProcessor {
                         if !self.disputed_transactions.contains(&tx.tx_id) {
                             // Not disputed, ignore
                         } else {
-                            if self.resolved_transactions.contains(&tx.tx_id) {
+                            if self.chargeback_transactions.contains(&tx.tx_id) {
                                 // Already resolved/Chargebacked, ignore
                             } else {
                                 client_entry.chargeback_funds(*amount);
-                                self.resolved_transactions.insert(tx.tx_id);
+                                self.chargeback_transactions.insert(tx.tx_id);
                             }
                         }
                     }
@@ -254,7 +254,7 @@ mod tests {
             }
         );
 
-        // Test that disputing second time doesn't change anything.
+        // Test that disputing second time while disputed doesn't change anything.
         process_tx(&mut tx_processor, dispute(TxDetails::Dispute, cid, 2)).await?;
 
         assert_eq!(
@@ -289,6 +289,19 @@ mod tests {
                 client: 1,
                 held: 0.0.into(),
                 available: 1500.0.into(),
+                locked: false,
+            }
+        );
+
+        // Test a dispute 2nd time after resolve.
+        process_tx(&mut tx_processor, dispute(TxDetails::Dispute, cid, 2)).await?;
+
+        assert_eq!(
+            tx_processor.clients_balance.get(&cid).unwrap(),
+            &ClientBalance {
+                client: 1,
+                held: 500.0.into(),
+                available: (1500.0 - 500.0).into(),
                 locked: false,
             }
         );
