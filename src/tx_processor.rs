@@ -1,5 +1,5 @@
 use crate::model::{ClientBalance, ClientId, Transaction, TxAmount, TxId, TxType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use futures::{Stream, StreamExt};
 use tokio::pin;
 use crate::TxProcessorError;
@@ -7,6 +7,7 @@ use crate::TxProcessorError;
 #[derive(Debug, Default)]
 pub struct TxProcessor {
     pub account_transactions: HashMap<TxId, TxAmount>,
+    pub disputed_transactions: HashSet<TxId>,
     pub clients_balance: HashMap<ClientId, ClientBalance>,
 }
 
@@ -42,21 +43,44 @@ impl TxProcessor {
                 }
                 TxType::Dispute => {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
-                        client_entry.hold_funds(*amount);
+                        if self.disputed_transactions.contains(&tx.tx_id) {
+                            // Already disputed, ignore
+                        } else {
+                            self.disputed_transactions.insert(tx.tx_id);
+                            client_entry.hold_funds(*amount);
+                        }
                     }
                 }
                 TxType::Resolve => {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
-                        client_entry.resolve_funds(*amount);
+                        if self.disputed_transactions.contains(&tx.tx_id) {
+                            client_entry.resolve_funds(*amount);
+                            // self.disputed_transactions.remove(&tx.tx_id);
+                        } else {
+                            // Not disputed, ignore
+                        }
                     }
                 }
                 TxType::Chargeback => {
+                    // Check tx_id is under dispute
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
-                        client_entry.chargeback_funds(*amount);
+                        if self.disputed_transactions.contains(&tx.tx_id) {
+                            client_entry.chargeback_funds(*amount);
+                            // self.disputed_transactions.remove(&tx.tx_id);
+                        } else {
+                            // Not disputed, ignore
+                        }
                     }
                 }
             }
 
+            // Store Deposits in account_transactions record for referencing during Disputes/Resolves.
+            // The spec doesn't clarify if it's Deposits or Withdrawals that can be disputed,
+            // but from the description:
+            // "This means that the clients available funds should decrease by the amount disputed,
+            // their held funds should increase by the amount disputed"
+            // only Deposits make sense for disputes.
+            // (Maybe Withdrawals too if amount was inverted)
             #[allow(clippy::single_match)]
             match tx.tx_type {
                 TxType::Deposit => {
@@ -111,7 +135,6 @@ mod tests {
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         let mut expected_balance = ClientBalance {
             client: 1,
-            total: 100.0.into(),
             held: 0.0.into(),
             available: 100.0.into(),
             locked: false,
@@ -122,7 +145,6 @@ mod tests {
         process_tx(&mut tx_processor, deposit(1, 2, 50.0.into())).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        expected_balance.total = 150.0.into();
         expected_balance.available = 150.0.into();
         assert_eq!(c1_balance, &expected_balance);
 
@@ -133,7 +155,6 @@ mod tests {
         let c1_balance = tx_processor.clients_balance.get(&client).unwrap();
         let expected_balance = ClientBalance {
             client,
-            total: 50.0.into(),
             held: 0.0.into(),
             available: 50.0.into(),
             locked: false,
@@ -154,7 +175,6 @@ mod tests {
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         let mut expected_balance = ClientBalance {
             client: 1,
-            total: 400.0.into(),
             held: 0.0.into(),
             available: 400.0.into(),
             locked: false,
@@ -171,7 +191,6 @@ mod tests {
         // Test a 3rd withdrawal
         process_tx(&mut tx_processor, withdrawal(1, 4, 400.0.into())).await?;
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        expected_balance.total = 0.0.into();
         expected_balance.available = 0.0.into();
         assert_eq!(c1_balance, &expected_balance);
 
@@ -204,7 +223,6 @@ mod tests {
             c1_balance,
             &ClientBalance {
                 client: 1,
-                total: 1500.0.into(),
                 held: 0.0.into(),
                 available: 1500.0.into(),
                 locked: false,
@@ -229,7 +247,6 @@ mod tests {
             c1_balance,
             &ClientBalance {
                 client: 1,
-                total: 1500.0.into(),
                 held: 500.0.into(),
                 available: (1500.0 - 500.0).into(),
                 locked: false,
@@ -244,7 +261,6 @@ mod tests {
             c1_balance,
             &ClientBalance {
                 client: 1,
-                total: 1500.0.into(),
                 held: 0.0.into(),
                 available: 1500.0.into(),
                 locked: false,
@@ -271,7 +287,6 @@ mod tests {
             c1_balance,
             &ClientBalance {
                 client: 1,
-                total: (50.0 + 60.0 + 80.0).into(),
                 held: (60.0 + 80.0).into(),
                 available: 50.0.into(),
                 locked: false,
@@ -286,7 +301,6 @@ mod tests {
             c1_balance,
             &ClientBalance {
                 client: 1,
-                total: (50.0 + 60.0 + 80.0).into(),
                 held: 80.0.into(),
                 available: (50.0 + 60.0).into(),
                 locked: false,
@@ -313,7 +327,6 @@ mod tests {
             c1_balance,
             &ClientBalance {
                 client: 1,
-                total: 1000.0.into(),
                 held: 0.0.into(),
                 available: 1000.0.into(),
                 locked: true,

@@ -27,7 +27,6 @@ pub struct Transaction {
 #[derive(Debug, PartialEq)]
 pub struct ClientBalance {
     pub client: ClientId,
-    pub total: TxAmount,
     pub held: TxAmount,
     pub available: TxAmount,
     pub locked: bool,
@@ -37,22 +36,23 @@ impl ClientBalance {
     pub fn new_empty(client: ClientId) -> ClientBalance {
         ClientBalance {
             client,
-            total: dec256!(0.0),
             available: dec256!(0.0),
             held: dec256!(0.0),
             locked: false,
         }
     }
 
+    pub fn total(&self) -> TxAmount {
+        self.available + self.held
+    }
+
     pub fn add_funds(&mut self, amount: TxAmount) {
         self.available += amount;
-        self.total += amount;
     }
 
     pub fn remove_funds(&mut self, amount: TxAmount) -> Result<(), TxProcessorError> {
         if self.available >= amount {
             self.available -= amount;
-            self.total -= amount;
             Ok(())
         } else {
             Err(TxProcessorError::WithdrawalError(self.available, amount))
@@ -72,7 +72,6 @@ impl ClientBalance {
     pub fn chargeback_funds(&mut self, amount: TxAmount) {
         // TODO: validate held >= amount
         self.held -= amount;
-        self.total -=amount;
         self.locked = true;
     }
 }
@@ -84,7 +83,7 @@ fn test_client_balance() {
 
     balance.add_funds(100.0.into());
     assert!(balance.available == 100.0.into());
-    assert!(balance.total == 100.0.into());
+    assert!(balance.total() == 100.0.into());
 
     balance.hold_funds(60.0.into());
     // fails:
@@ -93,17 +92,17 @@ fn test_client_balance() {
     balance.remove_funds(40.0.into()).unwrap();
 
     assert!(balance.available == 0.0.into());
-    assert!(balance.total == 60.0.into());
+    assert!(balance.total() == 60.0.into());
     assert!(balance.held == 60.0.into());
     balance.resolve_funds(60.0.into());
     assert!(balance.available == 60.0.into());
-    assert!(balance.total == 60.0.into());
+    assert!(balance.total() == 60.0.into());
     assert!(balance.held == 00.0.into());
 
     balance.hold_funds(20.0.into());
     balance.chargeback_funds(20.0.into());
     assert!(balance.available == 40.0.into());
-    assert!(balance.total == 40.0.into());
+    assert!(balance.total() == 40.0.into());
     assert!(balance.held == 00.0.into());
     assert!(balance.locked == true);
 }
