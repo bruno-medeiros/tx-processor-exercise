@@ -1,5 +1,6 @@
+use fastnum::{dec256};
 use strum_macros::EnumString;
-use crate::GResult;
+use crate::TxProcessorError;
 
 #[derive(Debug, Eq, PartialEq, serde::Deserialize, EnumString)]
 #[strum(ascii_case_insensitive)]
@@ -13,18 +14,17 @@ pub enum TxType {
 
 pub type ClientId = u16;
 pub type TxId = u32;
-pub type TxAmount = f64;
+pub type TxAmount = fastnum::D256;
 
-#[derive(Debug, PartialEq,  serde::Deserialize)]
+#[derive(Debug, PartialEq)]
 pub struct Transaction {
-    #[serde(rename = "type")]
     pub tx_type: TxType,
     pub client: ClientId,
     pub tx_id: TxId,
     pub amount: Option<TxAmount>,
 }
 
-#[derive(Debug, PartialEq,  serde::Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct ClientBalance {
     pub client: ClientId,
     pub total: TxAmount,
@@ -37,9 +37,9 @@ impl ClientBalance {
     pub fn new_empty(client: ClientId) -> ClientBalance {
         ClientBalance {
             client,
-            total: 0.0,
-            available: 0.0,
-            held: 0.0,
+            total: dec256!(0.0),
+            available: dec256!(0.0),
+            held: dec256!(0.0),
             locked: false,
         }
     }
@@ -49,13 +49,13 @@ impl ClientBalance {
         self.total += amount;
     }
 
-    pub fn remove_funds(&mut self, amount: TxAmount) -> GResult<()> {
+    pub fn remove_funds(&mut self, amount: TxAmount) -> Result<(), TxProcessorError> {
         if self.available >= amount {
             self.available -= amount;
             self.total -= amount;
             Ok(())
         } else {
-            Err("Not enough founds to withdraw".into())
+            Err(TxProcessorError::WithdrawalError(self.available, amount))
         }
     }
 
@@ -82,28 +82,28 @@ fn test_client_balance() {
     let mut balance = ClientBalance::new_empty(123);
     assert!(balance.locked == false);
 
-    balance.add_funds(100.0);
-    assert!(balance.available == 100.0);
-    assert!(balance.total == 100.0);
+    balance.add_funds(100.0.into());
+    assert!(balance.available == 100.0.into());
+    assert!(balance.total == 100.0.into());
 
-    balance.hold_funds(60.0);
+    balance.hold_funds(60.0.into());
     // fails:
-    balance.remove_funds(60.0).unwrap_err();
+    balance.remove_funds(60.0.into()).unwrap_err();
     // succeeds:
-    balance.remove_funds(40.0).unwrap();
+    balance.remove_funds(40.0.into()).unwrap();
 
-    assert!(balance.available == 0.0);
-    assert!(balance.total == 60.0);
-    assert!(balance.held == 60.0);
-    balance.resolve_funds(60.0);
-    assert!(balance.available == 60.0);
-    assert!(balance.total == 60.0);
-    assert!(balance.held == 00.0);
+    assert!(balance.available == 0.0.into());
+    assert!(balance.total == 60.0.into());
+    assert!(balance.held == 60.0.into());
+    balance.resolve_funds(60.0.into());
+    assert!(balance.available == 60.0.into());
+    assert!(balance.total == 60.0.into());
+    assert!(balance.held == 00.0.into());
 
-    balance.hold_funds(20.0);
-    balance.chargeback_funds(20.0);
-    assert!(balance.available == 40.0);
-    assert!(balance.total == 40.0);
-    assert!(balance.held == 00.0);
+    balance.hold_funds(20.0.into());
+    balance.chargeback_funds(20.0.into());
+    assert!(balance.available == 40.0.into());
+    assert!(balance.total == 40.0.into());
+    assert!(balance.held == 00.0.into());
     assert!(balance.locked == true);
 }

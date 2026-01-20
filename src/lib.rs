@@ -1,49 +1,84 @@
 use crate::tx_processor::TxProcessor;
-use csv::StringRecord;
+use fastnum::decimal::Context;
+use futures::stream::StreamExt;
+use futures::TryStreamExt;
 use model::{Transaction, TxType};
-use std::error::Error;
 use std::io;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_stream::wrappers::LinesStream;
 
 pub mod model;
 pub mod tx_processor;
 
-// Result alias to be less verbose
-pub type GResult<T> = Result<T, Box<dyn Error>>;
+#[derive(Debug, thiserror::Error)]
+pub enum TxProcessorError {
+    #[error("IoError")]
+    IoError(#[from] io::Error),
+    #[error("CSV parseError: {0}")]
+    CSvParseError(String),
+    #[error("ParseError: {0}")]
+    ParseError(#[from] strum::ParseError),
+    #[error("ParseIntError: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+    #[error("DecimalParseError: {0}")]
+    DecimalParseError(#[from] fastnum::decimal::ParseError),
+    #[error("Amount missing")]
+    AmountMissing,
+    #[error("Not enough founds to withdraw. available={0}, requested={1}")]
+    WithdrawalError(fastnum::D256, fastnum::D256),
+}
 
-pub fn process_file_and_output<OUT: io::Write>(path: &str, stdout: &mut OUT) -> GResult<()> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = csv::Reader::from_reader(file);
-    let mut iter = reader.records().map::<GResult<Transaction>, _>(|record| {
-        let transaction = parse_csv_transaction(&record?)?;
-        Ok(transaction)
-    });
+pub async fn process_file_and_output<OUT: io::Write>(
+    path: &str,
+    stdout: &mut OUT,
+) -> Result<(), TxProcessorError> {
+    let file = File::open(path).await?;
+    let reader = BufReader::new(file);
+    let lines = reader.lines();
+    let mut line_stream = LinesStream::new(lines);
+
+    // Skip header line if present
+    let header = line_stream.next().await;
+    if let Some(Ok(header)) = header {
+        if !header.starts_with("type,") {
+            return Err(TxProcessorError::CSvParseError(
+                "header missing".to_string(),
+            ));
+        }
+    }
+
+    // Convert Lines to Stream and process each line
+    let transaction_stream = line_stream
+        .map_err(TxProcessorError::IoError)
+        .and_then(|line| async move { parse_csv_transaction(line) });
+
     let mut tx_processor = TxProcessor::new();
-    tx_processor.process_input(&mut iter)?;
+    tx_processor.process_input(transaction_stream).await?;
 
     // Write output
-    write!(stdout, "client, available, held, total, locked\n")?;
+    writeln!(stdout, "client, available, held, total, locked")?;
     let values = tx_processor.clients_balance.values();
 
     for cb in values {
         let client = cb.client;
         let (available, held, total, locked) = (cb.available, cb.held, cb.total, cb.locked);
-        write!(stdout, "{client}, {available}, {held}, {total}, {locked}\n")?;
+        writeln!(stdout, "{client}, {available}, {held}, {total}, {locked}")?;
     }
     Ok(())
 }
 
-fn parse_csv_transaction(record: &StringRecord) -> GResult<Transaction> {
-    // not using serde with CSV reader directly because it seems to
-    // have problems parsing number with leading spaces?
+fn parse_csv_transaction(line: String) -> Result<Transaction, TxProcessorError> {
+    let record: Vec<&str> = line.split(',').collect();
 
     let tx_type: TxType = record[0].parse()?;
     let client: u16 = record[1].trim().parse()?;
     let tx: u32 = record[2].trim().parse()?;
     let amount = record[3].trim();
-    let amount: Option<f64> = if amount.is_empty() {
+    let amount: Option<fastnum::D256> = if amount.is_empty() {
         None
     } else {
-        Some(amount.parse()?)
+        Some(fastnum::D256::from_str(amount, Context::default())?)
     };
 
     Ok(Transaction {
@@ -60,8 +95,8 @@ mod tests {
     use crate::model::TxType::{Chargeback, Deposit, Dispute, Resolve, Withdrawal};
 
     // test serialization
-    #[test]
-    fn test_parse_csv_transaction() {
+    #[tokio::test]
+    async fn test_parse_csv_transaction() {
         let input = r#"type, client,tx, amount
 deposit, 1, 2, 3.0
 withdrawal, 4, 5, 6.0
@@ -71,12 +106,13 @@ chargeback, 5, 6,
 "#
         .as_bytes();
 
-        let mut reader = csv::Reader::from_reader(input);
-        let iter = reader.records().map::<Transaction, _>(|record| {
-            let transaction = parse_csv_transaction(&record.unwrap()).unwrap();
-            transaction
-        });
-        let txs = iter.collect::<Vec<Transaction>>();
+        let  reader = BufReader::new(input);
+        let mut stream = LinesStream::new(reader.lines());
+        stream.next().await.unwrap().ok();
+
+        let txs = stream
+            .map(|res| parse_csv_transaction(res.unwrap()).unwrap())
+            .collect::<Vec<Transaction>>().await;
 
         assert!(txs.len() == 5);
 
@@ -86,7 +122,7 @@ chargeback, 5, 6,
                 tx_type: Deposit,
                 client: 1,
                 tx_id: 2,
-                amount: Some(3.0),
+                amount: Some(3.0.into()),
             }
         );
         assert_eq!(
@@ -95,7 +131,7 @@ chargeback, 5, 6,
                 tx_type: Withdrawal,
                 client: 4,
                 tx_id: 5,
-                amount: Some(6.0),
+                amount: Some(6.0.into()),
             }
         );
         assert_eq!(

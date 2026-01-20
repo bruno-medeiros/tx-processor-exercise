@@ -1,7 +1,10 @@
 use crate::model::{ClientBalance, ClientId, Transaction, TxAmount, TxId, TxType};
-use crate::GResult;
 use std::collections::HashMap;
+use futures::{Stream, StreamExt};
+use tokio::pin;
+use crate::TxProcessorError;
 
+#[derive(Debug, Default)]
 pub struct TxProcessor {
     pub account_transactions: HashMap<TxId, TxAmount>,
     pub clients_balance: HashMap<ClientId, ClientBalance>,
@@ -9,18 +12,16 @@ pub struct TxProcessor {
 
 impl TxProcessor {
     pub fn new() -> TxProcessor {
-        Self {
-            account_transactions: HashMap::new(),
-            clients_balance: HashMap::new(),
-        }
+        Self::default()
     }
 
-    pub fn process_input<ITER: Iterator<Item = GResult<Transaction>>>(
+    pub async fn process_input(
         &mut self,
-        tx_iter: ITER,
-    ) -> GResult<&HashMap<ClientId, ClientBalance>> {
-        for tx in tx_iter {
-            let tx = tx?;
+         tx_iter: impl Stream<Item = Result<Transaction, TxProcessorError>> + Send + 'static,
+    ) -> Result<&HashMap<ClientId, ClientBalance>, TxProcessorError> {
+        pin!(tx_iter);
+        while let Some(tx_res) = tx_iter.next().await {
+            let tx = tx_res?;
 
             let client_entry = self
                 .clients_balance
@@ -29,14 +30,15 @@ impl TxProcessor {
 
             match tx.tx_type {
                 TxType::Deposit => {
-                    let amount = tx.amount.ok_or("amount missing")?;
+                    let amount = tx.amount.ok_or(TxProcessorError::AmountMissing)?;
                     client_entry.add_funds(amount);
                 }
                 TxType::Withdrawal => {
-                    let amount = tx.amount.ok_or("amount missing")?;
-                    client_entry.remove_funds(amount).unwrap_or_else(|_err|{
+                    let amount = tx.amount.ok_or(TxProcessorError::AmountMissing)?;
+                    client_entry.remove_funds(amount).unwrap_or(
                         // withdrawal denied due to no funds
-                    });
+                        (),
+                    );
                 }
                 TxType::Dispute => {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
@@ -55,9 +57,10 @@ impl TxProcessor {
                 }
             }
 
+            #[allow(clippy::single_match)]
             match tx.tx_type {
                 TxType::Deposit => {
-                    let amount = tx.amount.ok_or("amount missing")?;
+                    let amount = tx.amount.ok_or(TxProcessorError::AmountMissing)?;
                     self.account_transactions.insert(tx.tx_id, amount);
                 }
                 _ => {}
@@ -70,6 +73,7 @@ impl TxProcessor {
 
 #[cfg(test)]
 mod tests {
+    use futures::stream;
     use super::*;
 
     // Some helper functions:
@@ -79,7 +83,7 @@ mod tests {
             tx_type: TxType::Deposit,
             client,
             tx_id,
-            amount : Some(amount),
+            amount: Some(amount),
         }
     }
     fn withdrawal(client: ClientId, tx_id: TxId, amount: TxAmount) -> Transaction {
@@ -87,50 +91,51 @@ mod tests {
             tx_type: TxType::Withdrawal,
             client,
             tx_id,
-            amount : Some(amount),
+            amount: Some(amount),
         }
     }
-    fn process_tx(tx_processor: &mut TxProcessor, transaction: Transaction) -> GResult<()> {
-        tx_processor.process_input(vec![transaction].into_iter().map(|tx| Ok(tx)))?;
+    async fn process_tx(tx_processor: &mut TxProcessor, transaction: Transaction) -> Result<(), TxProcessorError> {
+        let stream = stream::iter(vec![transaction]).map(Ok);
+        tx_processor.process_input(stream).await?;
         Ok(())
     }
 
-    #[test]
-    fn test_deposit() -> GResult<()> {
+    #[tokio::test]
+    async fn test_deposit() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
         assert!(tx_processor.clients_balance.is_empty());
 
         // Test a single deposit.
-        process_tx(&mut tx_processor, deposit(1, 1, 100.0))?;
+        process_tx(&mut tx_processor, deposit(1, 1, 100.0.into())).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         let mut expected_balance = ClientBalance {
             client: 1,
-            total: 100.0,
-            held: 0.0,
-            available: 100.0,
+            total: 100.0.into(),
+            held: 0.0.into(),
+            available: 100.0.into(),
             locked: false,
         };
         assert_eq!(c1_balance, &expected_balance);
 
         // Test a second deposit.
-        process_tx(&mut tx_processor, deposit(1, 2, 50.0))?;
+        process_tx(&mut tx_processor, deposit(1, 2, 50.0.into())).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        expected_balance.total = 150.0;
-        expected_balance.available = 150.0;
+        expected_balance.total = 150.0.into();
+        expected_balance.available = 150.0.into();
         assert_eq!(c1_balance, &expected_balance);
 
         // Test another deposit with different client.
         let client = 2;
-        process_tx(&mut tx_processor, deposit(client, 3, 50.0))?;
+        process_tx(&mut tx_processor, deposit(client, 3, 50.0.into())).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&client).unwrap();
         let expected_balance = ClientBalance {
             client,
-            total: 50.0,
-            held: 0.0,
-            available: 50.0,
+            total: 50.0.into(),
+            held: 0.0.into(),
+            available: 50.0.into(),
             locked: false,
         };
         assert_eq!(c1_balance, &expected_balance);
@@ -138,36 +143,36 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_withdrawal() -> GResult<()> {
+    #[tokio::test]
+    async fn test_withdrawal() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
 
-        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0.into())).await?;
 
         // Test a withdrawal.
-        process_tx(&mut tx_processor, withdrawal(1, 2, 600.0))?;
+        process_tx(&mut tx_processor, withdrawal(1, 2, 600.0.into())).await?;
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         let mut expected_balance = ClientBalance {
             client: 1,
-            total: 400.0,
-            held: 0.0,
-            available: 400.0,
+            total: 400.0.into(),
+            held: 0.0.into(),
+            available: 400.0.into(),
             locked: false,
         };
         assert_eq!(c1_balance, &expected_balance);
 
         // Test a second withdrawal with not enough funds.
-        process_tx(&mut tx_processor, withdrawal(1, 3, 600.0))?;
+        process_tx(&mut tx_processor, withdrawal(1, 3, 600.0.into())).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         // Expect balance doesn't change
         assert_eq!(c1_balance, &expected_balance);
 
         // Test a 3rd withdrawal
-        process_tx(&mut tx_processor, withdrawal(1, 4, 400.0))?;
+        process_tx(&mut tx_processor, withdrawal(1, 4, 400.0.into())).await?;
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        expected_balance.total = 0.0;
-        expected_balance.available = 0.0;
+        expected_balance.total = 0.0.into();
+        expected_balance.available = 0.0.into();
         assert_eq!(c1_balance, &expected_balance);
 
         Ok(())
@@ -178,124 +183,142 @@ mod tests {
             tx_type,
             client,
             tx_id,
-            amount : None,
+            amount: None,
         }
     }
 
-    #[test]
-    fn test_error_references() -> GResult<()> {
+    #[tokio::test]
+    async fn test_error_references() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
 
-        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
-        process_tx(&mut tx_processor, deposit(1, 2, 500.0))?;
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0.into())).await?;
+        process_tx(&mut tx_processor, deposit(1, 2, 500.0.into())).await?;
 
         // Test bad references.
-        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 666))?;
-        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 666))?;
-        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 666))?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 666)).await?;
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 666)).await?;
+        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 666)).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        assert_eq!(c1_balance, &ClientBalance {
-            client: 1,
-            total: 1500.0,
-            held: 0.0,
-            available: 1500.0,
-            locked: false,
-        });
+        assert_eq!(
+            c1_balance,
+            &ClientBalance {
+                client: 1,
+                total: 1500.0.into(),
+                held: 0.0.into(),
+                available: 1500.0.into(),
+                locked: false,
+            }
+        );
 
         Ok(())
     }
 
-    #[test]
-    fn test_dispute_resolve() -> GResult<()> {
+    #[tokio::test]
+    async fn test_dispute_resolve() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
 
-        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
-        process_tx(&mut tx_processor, deposit(1, 2, 500.0))?;
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0.into())).await?;
+        process_tx(&mut tx_processor, deposit(1, 2, 500.0.into())).await?;
 
         // Test a dispute.
-        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2))?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2)).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        assert_eq!(c1_balance, &ClientBalance {
-            client: 1,
-            total: 1500.0,
-            held: 500.0,
-            available: 1500.0 - 500.0,
-            locked: false,
-        });
+        assert_eq!(
+            c1_balance,
+            &ClientBalance {
+                client: 1,
+                total: 1500.0.into(),
+                held: 500.0.into(),
+                available: (1500.0 - 500.0).into(),
+                locked: false,
+            }
+        );
 
         // Test a resolve.
-        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2))?;
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2)).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        assert_eq!(c1_balance, &ClientBalance {
-            client: 1,
-            total: 1500.0,
-            held: 0.0,
-            available: 1500.0,
-            locked: false,
-        });
+        assert_eq!(
+            c1_balance,
+            &ClientBalance {
+                client: 1,
+                total: 1500.0.into(),
+                held: 0.0.into(),
+                available: 1500.0.into(),
+                locked: false,
+            }
+        );
 
         Ok(())
     }
 
-    #[test]
-    fn test_dispute_resolve_multiple() -> GResult<()> {
+    #[tokio::test]
+    async fn test_dispute_resolve_multiple() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
 
-        process_tx(&mut tx_processor, deposit(1, 1, 50.0))?;
-        process_tx(&mut tx_processor, deposit(1, 2, 60.0))?;
-        process_tx(&mut tx_processor, deposit(1, 3, 80.0))?;
+        process_tx(&mut tx_processor, deposit(1, 1, 50.0.into())).await?;
+        process_tx(&mut tx_processor, deposit(1, 2, 60.0.into())).await?;
+        process_tx(&mut tx_processor, deposit(1, 3, 80.0.into())).await?;
 
         // Test two pending disputes.
-        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2))?;
-        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 3))?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2)).await?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 3)).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        assert_eq!(c1_balance, &ClientBalance {
-            client: 1,
-            total: 50.0 + 60.0 + 80.0,
-            held: 60.0 + 80.0,
-            available: 50.0,
-            locked: false,
-        });
+        assert_eq!(
+            c1_balance,
+            &ClientBalance {
+                client: 1,
+                total: (50.0 + 60.0 + 80.0).into(),
+                held: (60.0 + 80.0).into(),
+                available: 50.0.into(),
+                locked: false,
+            }
+        );
 
         // Test a resolve.
-        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2))?;
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2)).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        assert_eq!(c1_balance, &ClientBalance {
-            client: 1,
-            total: 50.0 + 60.0 + 80.0,
-            held: 80.0,
-            available: 50.0 + 60.0,
-            locked: false,
-        });
+        assert_eq!(
+            c1_balance,
+            &ClientBalance {
+                client: 1,
+                total: (50.0 + 60.0 + 80.0).into(),
+                held: 80.0.into(),
+                available: (50.0 + 60.0).into(),
+                locked: false,
+            }
+        );
 
         Ok(())
     }
 
-    #[test]
-    fn test_chargeback() -> GResult<()> {
+    #[tokio::test]
+    async fn test_chargeback() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
 
-        process_tx(&mut tx_processor, deposit(1, 1, 1000.0))?;
-        process_tx(&mut tx_processor, deposit(1, 2, 500.0))?;
+        process_tx(&mut tx_processor, deposit(1, 1, 1000.0.into())).await?;
+        process_tx(&mut tx_processor, deposit(1, 2, 500.0.into())).await?;
 
-        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2))?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2)).await?;
 
         // Test chargeback
-        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 2))?;
+        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 2)).await?;
 
         let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
-        assert_eq!(c1_balance, &ClientBalance {
-            client: 1,
-            total: 1000.0,
-            held: 00.0,
-            available: 1000.0,
-            locked: true,
-        });
+        assert_eq!(
+            c1_balance,
+            &ClientBalance {
+                client: 1,
+                total: 1000.0.into(),
+                held: 0.0.into(),
+                available: 1000.0.into(),
+                locked: true,
+            }
+        );
 
         Ok(())
     }
