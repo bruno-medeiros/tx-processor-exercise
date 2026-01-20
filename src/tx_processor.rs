@@ -1,8 +1,8 @@
 use crate::model::{ClientBalance, ClientId, Transaction, TxAmount, TxId, TxType};
-use std::collections::{HashMap, HashSet};
-use futures::{Stream, StreamExt};
-use tokio::pin;
 use crate::TxProcessorError;
+use futures::{Stream, StreamExt};
+use std::collections::{HashMap, HashSet};
+use tokio::pin;
 
 #[derive(Debug, Default)]
 pub struct TxProcessor {
@@ -18,7 +18,7 @@ impl TxProcessor {
 
     pub async fn process_input(
         &mut self,
-         tx_iter: impl Stream<Item = Result<Transaction, TxProcessorError>> + Send + 'static,
+        tx_iter: impl Stream<Item = Result<Transaction, TxProcessorError>> + Send + 'static,
     ) -> Result<&HashMap<ClientId, ClientBalance>, TxProcessorError> {
         pin!(tx_iter);
         while let Some(tx_res) = tx_iter.next().await {
@@ -46,6 +46,7 @@ impl TxProcessor {
                         if self.disputed_transactions.contains(&tx.tx_id) {
                             // Already disputed, ignore
                         } else {
+                            // TODO: also check already resolved/chargebacked txs?
                             self.disputed_transactions.insert(tx.tx_id);
                             client_entry.hold_funds(*amount);
                         }
@@ -55,7 +56,7 @@ impl TxProcessor {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
                         if self.disputed_transactions.contains(&tx.tx_id) {
                             client_entry.resolve_funds(*amount);
-                            // self.disputed_transactions.remove(&tx.tx_id);
+                            self.disputed_transactions.remove(&tx.tx_id);
                         } else {
                             // Not disputed, ignore
                         }
@@ -66,7 +67,7 @@ impl TxProcessor {
                     if let Some(amount) = self.account_transactions.get(&tx.tx_id) {
                         if self.disputed_transactions.contains(&tx.tx_id) {
                             client_entry.chargeback_funds(*amount);
-                            // self.disputed_transactions.remove(&tx.tx_id);
+                            self.disputed_transactions.remove(&tx.tx_id);
                         } else {
                             // Not disputed, ignore
                         }
@@ -97,8 +98,8 @@ impl TxProcessor {
 
 #[cfg(test)]
 mod tests {
-    use futures::stream;
     use super::*;
+    use futures::stream;
 
     // Some helper functions:
 
@@ -118,7 +119,10 @@ mod tests {
             amount: Some(amount),
         }
     }
-    async fn process_tx(tx_processor: &mut TxProcessor, transaction: Transaction) -> Result<(), TxProcessorError> {
+    async fn process_tx(
+        tx_processor: &mut TxProcessor,
+        transaction: Transaction,
+    ) -> Result<(), TxProcessorError> {
         let stream = stream::iter(vec![transaction]).map(Ok);
         tx_processor.process_input(stream).await?;
         Ok(())
@@ -218,9 +222,8 @@ mod tests {
         process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 666)).await?;
         process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 666)).await?;
 
-        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         assert_eq!(
-            c1_balance,
+            tx_processor.clients_balance.get(&1).unwrap(),
             &ClientBalance {
                 client: 1,
                 held: 0.0.into(),
@@ -236,15 +239,29 @@ mod tests {
     async fn test_dispute_resolve() -> Result<(), TxProcessorError> {
         let mut tx_processor = TxProcessor::new();
 
-        process_tx(&mut tx_processor, deposit(1, 1, 1000.0.into())).await?;
-        process_tx(&mut tx_processor, deposit(1, 2, 500.0.into())).await?;
+        let cid = 1;
+
+        process_tx(&mut tx_processor, deposit(cid, 1, 1000.0.into())).await?;
+        process_tx(&mut tx_processor, deposit(cid, 2, 500.0.into())).await?;
 
         // Test a dispute.
-        process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2)).await?;
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, cid, 2)).await?;
 
-        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         assert_eq!(
-            c1_balance,
+            tx_processor.clients_balance.get(&cid).unwrap(),
+            &ClientBalance {
+                client: 1,
+                held: 500.0.into(),
+                available: (1500.0 - 500.0).into(),
+                locked: false,
+            }
+        );
+
+        // Test that disputing second time doesn't change anything.
+        process_tx(&mut tx_processor, dispute(TxType::Dispute, cid, 2)).await?;
+
+        assert_eq!(
+            tx_processor.clients_balance.get(&cid).unwrap(),
             &ClientBalance {
                 client: 1,
                 held: 500.0.into(),
@@ -256,9 +273,21 @@ mod tests {
         // Test a resolve.
         process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2)).await?;
 
-        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         assert_eq!(
-            c1_balance,
+            tx_processor.clients_balance.get(&1).unwrap(),
+            &ClientBalance {
+                client: 1,
+                held: 0.0.into(),
+                available: 1500.0.into(),
+                locked: false,
+            }
+        );
+
+        // Test a resolve of non-disputed tx
+        process_tx(&mut tx_processor, dispute(TxType::Resolve, cid, 1)).await?;
+
+        assert_eq!(
+            tx_processor.clients_balance.get(&1).unwrap(),
             &ClientBalance {
                 client: 1,
                 held: 0.0.into(),
@@ -282,9 +311,8 @@ mod tests {
         process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2)).await?;
         process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 3)).await?;
 
-        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         assert_eq!(
-            c1_balance,
+            tx_processor.clients_balance.get(&1).unwrap(),
             &ClientBalance {
                 client: 1,
                 held: (60.0 + 80.0).into(),
@@ -296,9 +324,8 @@ mod tests {
         // Test a resolve.
         process_tx(&mut tx_processor, dispute(TxType::Resolve, 1, 2)).await?;
 
-        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         assert_eq!(
-            c1_balance,
+            tx_processor.clients_balance.get(&1).unwrap(),
             &ClientBalance {
                 client: 1,
                 held: 80.0.into(),
@@ -317,14 +344,26 @@ mod tests {
         process_tx(&mut tx_processor, deposit(1, 1, 1000.0.into())).await?;
         process_tx(&mut tx_processor, deposit(1, 2, 500.0.into())).await?;
 
+        // Test chargeback for non-disputed
+        process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 2)).await?;
+        assert_eq!(
+            tx_processor.clients_balance.get(&1).unwrap(),
+            &ClientBalance {
+                client: 1,
+                held: 0.0.into(),
+                available: 1500.0.into(),
+                // not locked:
+                locked: false,
+            }
+        );
+
         process_tx(&mut tx_processor, dispute(TxType::Dispute, 1, 2)).await?;
 
         // Test chargeback
         process_tx(&mut tx_processor, dispute(TxType::Chargeback, 1, 2)).await?;
 
-        let c1_balance = tx_processor.clients_balance.get(&1).unwrap();
         assert_eq!(
-            c1_balance,
+            tx_processor.clients_balance.get(&1).unwrap(),
             &ClientBalance {
                 client: 1,
                 held: 0.0.into(),

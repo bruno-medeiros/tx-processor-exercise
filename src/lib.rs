@@ -67,7 +67,7 @@ pub async fn process_file_and_output<OUT: io::Write>(
         // Convert to float just for printing and avoid trailing zeros
         let available = cb.available.to_f64();
         let held = cb.held.to_f64();
-        let total = cb.total.to_f64();
+        let total = cb.total().to_f64();
         writeln!(stdout, "{client}, {available}, {held}, {total}, {locked}")?;
     }
     Ok(())
