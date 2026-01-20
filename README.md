@@ -10,3 +10,6 @@ Basic design of the transaction processor: Each transaction is streamed and proc
 
  - Made assumption that transactions can only Resolved/Chargedback once. (TODO: needs tests for this)
 
+
+## AI use
+ * AI was just used for minor edits: changing the processor from using Iterator to using Stream, change the amount type to fastnum and fix the tests compilation using .into(), asking question about how to print fastnum without trailing zeros, and that was about it.
