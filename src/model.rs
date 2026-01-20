@@ -2,7 +2,7 @@ use crate::TxProcessorError;
 use fastnum::dec256;
 use strum_macros::EnumString;
 
-#[derive(Debug, Eq, PartialEq, serde::Deserialize, EnumString)]
+#[derive(Debug, Eq, PartialEq, serde::Deserialize, EnumString, Clone, Copy)]
 #[strum(ascii_case_insensitive)]
 pub enum TxType {
     Deposit,
@@ -18,10 +18,18 @@ pub type TxAmount = fastnum::D256;
 
 #[derive(Debug, PartialEq)]
 pub struct Transaction {
-    pub tx_type: TxType,
     pub client: ClientId,
     pub tx_id: TxId,
-    pub amount: Option<TxAmount>,
+    pub tx_details: TxDetails,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum TxDetails {
+    Deposit { amount: TxAmount },
+    Withdrawal { amount: TxAmount },
+    Dispute,
+    Resolve,
+    Chargeback,
 }
 
 #[derive(Debug, PartialEq)]

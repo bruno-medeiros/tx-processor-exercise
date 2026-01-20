@@ -1,3 +1,4 @@
+use crate::model::TxDetails;
 use crate::tx_processor::TxProcessor;
 use fastnum::decimal::Context;
 use futures::stream::StreamExt;
@@ -86,17 +87,25 @@ fn parse_csv_transaction(line: String) -> Result<Transaction, TxProcessorError> 
     };
 
     Ok(Transaction {
-        tx_type,
         client,
         tx_id: tx,
-        amount,
+        tx_details: match tx_type {
+            TxType::Deposit => TxDetails::Deposit {
+                amount: amount.ok_or(TxProcessorError::AmountMissing)?,
+            },
+            TxType::Withdrawal => TxDetails::Withdrawal {
+                amount: amount.ok_or(TxProcessorError::AmountMissing)?,
+            },
+            TxType::Dispute => TxDetails::Dispute,
+            TxType::Resolve => TxDetails::Resolve,
+            TxType::Chargeback => TxDetails::Chargeback,
+        },
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TxType::{Chargeback, Deposit, Dispute, Resolve, Withdrawal};
 
     // test serialization
     #[tokio::test]
@@ -124,46 +133,41 @@ chargeback, 5, 6,
         assert_eq!(
             txs[0],
             Transaction {
-                tx_type: Deposit,
                 client: 1,
                 tx_id: 2,
-                amount: Some(3.0.into()),
+                tx_details: TxDetails::Deposit { amount: 3.0.into() },
             }
         );
         assert_eq!(
             txs[1],
             Transaction {
-                tx_type: Withdrawal,
                 client: 4,
                 tx_id: 5,
-                amount: Some(6.0.into()),
+                tx_details: TxDetails::Withdrawal { amount: 6.0.into() },
             }
         );
         assert_eq!(
             txs[2],
             Transaction {
-                tx_type: Dispute,
                 client: 1,
                 tx_id: 2,
-                amount: None,
+                tx_details: TxDetails::Dispute
             }
         );
         assert_eq!(
             txs[3],
             Transaction {
-                tx_type: Resolve,
                 client: 3,
                 tx_id: 4,
-                amount: None,
+                tx_details: TxDetails::Resolve
             }
         );
         assert_eq!(
             txs[4],
             Transaction {
-                tx_type: Chargeback,
                 client: 5,
                 tx_id: 6,
-                amount: None,
+                tx_details: TxDetails::Chargeback
             }
         );
     }
